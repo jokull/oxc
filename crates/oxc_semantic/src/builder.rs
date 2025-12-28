@@ -2078,6 +2078,7 @@ impl<'a> Visit<'a> for SemanticBuilder<'a> {
     fn visit_catch_parameter(&mut self, param: &CatchParameter<'a>) {
         let kind = AstKind::CatchParameter(self.alloc(param));
         self.enter_node(kind);
+        param.bind(self);
         self.visit_span(&param.span);
         self.visit_binding_pattern(&param.pattern);
         if let Some(type_annotation) = &param.type_annotation {
@@ -2090,6 +2091,9 @@ impl<'a> Visit<'a> for SemanticBuilder<'a> {
     fn visit_ts_type_query(&mut self, ty: &TSTypeQuery<'a>) {
         let kind = AstKind::TSTypeQuery(self.alloc(ty));
         self.enter_node(kind);
+        // type A = typeof a;
+        //          ^^^^^^^^
+        self.current_reference_flags = ReferenceFlags::ValueAsType;
         self.visit_span(&ty.span);
         self.visit_ts_type_query_expr_name(&ty.expr_name);
         if let Some(type_arguments) = &ty.type_arguments {
@@ -2102,12 +2106,230 @@ impl<'a> Visit<'a> for SemanticBuilder<'a> {
     fn visit_ts_property_signature(&mut self, sig: &TSPropertySignature<'a>) {
         let kind = AstKind::TSPropertySignature(self.alloc(sig));
         self.enter_node(kind);
+        if sig.key.is_expression() {
+            // interface A { [prop]: string }
+            //               ^^^^^ The property can reference value or [`SymbolFlags::TypeImport`] symbol
+            self.current_reference_flags = ReferenceFlags::ValueAsType;
+        }
         self.visit_span(&sig.span);
         self.visit_property_key(&sig.key);
         if let Some(type_annotation) = &sig.type_annotation {
             self.visit_ts_type_annotation(type_annotation);
         }
         self.current_reference_flags = ReferenceFlags::empty();
+        self.leave_node(kind);
+    }
+
+    fn visit_import_specifier(&mut self, specifier: &ImportSpecifier<'a>) {
+        let kind = AstKind::ImportSpecifier(self.alloc(specifier));
+        self.enter_node(kind);
+        specifier.bind(self);
+        self.visit_span(&specifier.span);
+        self.visit_module_export_name(&specifier.imported);
+        self.visit_binding_identifier(&specifier.local);
+        self.leave_node(kind);
+    }
+
+    fn visit_import_default_specifier(&mut self, specifier: &ImportDefaultSpecifier<'a>) {
+        let kind = AstKind::ImportDefaultSpecifier(self.alloc(specifier));
+        self.enter_node(kind);
+        specifier.bind(self);
+        self.visit_span(&specifier.span);
+        self.visit_binding_identifier(&specifier.local);
+        self.leave_node(kind);
+    }
+
+    fn visit_import_namespace_specifier(&mut self, specifier: &ImportNamespaceSpecifier<'a>) {
+        let kind = AstKind::ImportNamespaceSpecifier(self.alloc(specifier));
+        self.enter_node(kind);
+        specifier.bind(self);
+        self.visit_span(&specifier.span);
+        self.visit_binding_identifier(&specifier.local);
+        self.leave_node(kind);
+    }
+
+    fn visit_ts_import_equals_declaration(&mut self, decl: &TSImportEqualsDeclaration<'a>) {
+        let kind = AstKind::TSImportEqualsDeclaration(self.alloc(decl));
+        self.enter_node(kind);
+        decl.bind(self);
+        self.visit_span(&decl.span);
+        self.visit_binding_identifier(&decl.id);
+        self.visit_ts_module_reference(&decl.module_reference);
+        self.leave_node(kind);
+    }
+
+    fn visit_variable_declarator(&mut self, decl: &VariableDeclarator<'a>) {
+        let kind = AstKind::VariableDeclarator(self.alloc(decl));
+        self.enter_node(kind);
+        decl.bind(self);
+        self.visit_span(&decl.span);
+        self.visit_binding_pattern(&decl.id);
+        if let Some(type_annotation) = &decl.type_annotation {
+            self.visit_ts_type_annotation(type_annotation);
+        }
+        if let Some(init) = &decl.init {
+            self.visit_expression(init);
+        }
+        self.leave_node(kind);
+    }
+
+    fn visit_class_body(&mut self, body: &ClassBody<'a>) {
+        let kind = AstKind::ClassBody(self.alloc(body));
+        self.enter_node(kind);
+        self.class_table_builder.declare_class_body(body, self.current_node_id, &self.nodes);
+        self.visit_span(&body.span);
+        self.visit_class_elements(&body.body);
+        self.leave_node(kind);
+    }
+
+    fn visit_private_identifier(&mut self, ident: &PrivateIdentifier<'a>) {
+        let kind = AstKind::PrivateIdentifier(self.alloc(ident));
+        self.enter_node(kind);
+        self.class_table_builder.add_private_identifier_reference(
+            ident,
+            self.current_node_id,
+            &self.nodes,
+        );
+        self.visit_span(&ident.span);
+        self.leave_node(kind);
+    }
+
+    fn visit_binding_rest_element(&mut self, element: &BindingRestElement<'a>) {
+        let kind = AstKind::BindingRestElement(self.alloc(element));
+        self.enter_node(kind);
+        element.bind(self);
+        self.visit_span(&element.span);
+        self.visit_binding_pattern(&element.argument);
+        self.leave_node(kind);
+    }
+
+    fn visit_formal_parameter(&mut self, param: &FormalParameter<'a>) {
+        let kind = AstKind::FormalParameter(self.alloc(param));
+        self.enter_node(kind);
+        param.bind(self);
+        self.visit_span(&param.span);
+        self.visit_decorators(&param.decorators);
+        self.visit_binding_pattern(&param.pattern);
+        if let Some(type_annotation) = &param.type_annotation {
+            self.visit_ts_type_annotation(type_annotation);
+        }
+        if let Some(initializer) = &param.initializer {
+            self.visit_expression(initializer);
+        }
+        self.leave_node(kind);
+    }
+
+    fn visit_formal_parameter_rest(&mut self, param: &FormalParameterRest<'a>) {
+        let kind = AstKind::FormalParameterRest(self.alloc(param));
+        self.enter_node(kind);
+        param.bind(self);
+        self.visit_span(&param.span);
+        self.visit_binding_rest_element(&param.rest);
+        if let Some(type_annotation) = &param.type_annotation {
+            self.visit_ts_type_annotation(type_annotation);
+        }
+        self.leave_node(kind);
+    }
+
+    fn visit_ts_module_declaration(&mut self, decl: &TSModuleDeclaration<'a>) {
+        let kind = AstKind::TSModuleDeclaration(self.alloc(decl));
+        self.enter_node(kind);
+        decl.bind(self);
+        self.visit_span(&decl.span);
+        self.visit_ts_module_declaration_name(&decl.id);
+        self.enter_scope(
+            {
+                let mut flags = ScopeFlags::TsModuleBlock;
+                if decl.body.as_ref().is_some_and(TSModuleDeclarationBody::has_use_strict_directive)
+                {
+                    flags |= ScopeFlags::StrictMode;
+                }
+                flags
+            },
+            &decl.scope_id,
+        );
+        if let Some(body) = &decl.body {
+            self.visit_ts_module_declaration_body(body);
+        }
+        self.leave_scope();
+        self.leave_node(kind);
+    }
+
+    fn visit_ts_type_alias_declaration(&mut self, decl: &TSTypeAliasDeclaration<'a>) {
+        let kind = AstKind::TSTypeAliasDeclaration(self.alloc(decl));
+        self.enter_node(kind);
+        decl.bind(self);
+        self.visit_span(&decl.span);
+        self.visit_binding_identifier(&decl.id);
+        self.enter_scope(ScopeFlags::empty(), &decl.scope_id);
+        if let Some(type_parameters) = &decl.type_parameters {
+            self.visit_ts_type_parameter_declaration(type_parameters);
+        }
+        self.visit_ts_type(&decl.type_annotation);
+        self.leave_scope();
+        self.leave_node(kind);
+    }
+
+    fn visit_ts_interface_declaration(&mut self, decl: &TSInterfaceDeclaration<'a>) {
+        let kind = AstKind::TSInterfaceDeclaration(self.alloc(decl));
+        self.enter_node(kind);
+        decl.bind(self);
+        self.visit_span(&decl.span);
+        self.visit_binding_identifier(&decl.id);
+        self.enter_scope(ScopeFlags::empty(), &decl.scope_id);
+        if let Some(type_parameters) = &decl.type_parameters {
+            self.visit_ts_type_parameter_declaration(type_parameters);
+        }
+        self.visit_ts_interface_heritages(&decl.extends);
+        self.visit_ts_interface_body(&decl.body);
+        self.leave_scope();
+        self.leave_node(kind);
+    }
+
+    fn visit_ts_enum_declaration(&mut self, decl: &TSEnumDeclaration<'a>) {
+        let kind = AstKind::TSEnumDeclaration(self.alloc(decl));
+        self.enter_node(kind);
+        decl.bind(self);
+        self.visit_span(&decl.span);
+        self.visit_binding_identifier(&decl.id);
+        self.enter_scope(ScopeFlags::empty(), &decl.scope_id);
+        self.visit_ts_enum_body(&decl.body);
+        self.leave_scope();
+        self.leave_node(kind);
+    }
+
+    fn visit_ts_enum_member(&mut self, member: &TSEnumMember<'a>) {
+        let kind = AstKind::TSEnumMember(self.alloc(member));
+        self.enter_node(kind);
+        member.bind(self);
+        self.visit_span(&member.span);
+        self.visit_ts_enum_member_name(&member.id);
+        if let Some(initializer) = &member.initializer {
+            self.visit_expression(initializer);
+        }
+        self.leave_node(kind);
+    }
+
+    fn visit_ts_type_parameter(&mut self, param: &TSTypeParameter<'a>) {
+        let kind = AstKind::TSTypeParameter(self.alloc(param));
+        self.enter_node(kind);
+        param.bind(self);
+        self.visit_span(&param.span);
+        self.visit_binding_identifier(&param.name);
+        if let Some(constraint) = &param.constraint {
+            self.visit_ts_type(constraint);
+        }
+        if let Some(default) = &param.default {
+            self.visit_ts_type(default);
+        }
+        self.leave_node(kind);
+    }
+
+    fn visit_identifier_reference(&mut self, ident: &IdentifierReference<'a>) {
+        let kind = AstKind::IdentifierReference(self.alloc(ident));
+        self.enter_node(kind);
+        self.reference_identifier(ident);
+        self.visit_span(&ident.span);
         self.leave_node(kind);
     }
 }
@@ -2131,79 +2353,6 @@ impl<'a> SemanticBuilder<'a> {
         /* cfg */
 
         match kind {
-            AstKind::ImportSpecifier(specifier) => {
-                specifier.bind(self);
-            }
-            AstKind::ImportDefaultSpecifier(specifier) => {
-                specifier.bind(self);
-            }
-            AstKind::ImportNamespaceSpecifier(specifier) => {
-                specifier.bind(self);
-            }
-            AstKind::TSImportEqualsDeclaration(decl) => {
-                decl.bind(self);
-            }
-            AstKind::VariableDeclarator(decl) => {
-                decl.bind(self);
-            }
-
-            AstKind::ClassBody(body) => {
-                self.class_table_builder.declare_class_body(
-                    body,
-                    self.current_node_id,
-                    &self.nodes,
-                );
-            }
-            AstKind::PrivateIdentifier(ident) => {
-                self.class_table_builder.add_private_identifier_reference(
-                    ident,
-                    self.current_node_id,
-                    &self.nodes,
-                );
-            }
-            AstKind::BindingRestElement(element) => {
-                element.bind(self);
-            }
-            AstKind::FormalParameter(param) => {
-                param.bind(self);
-            }
-            AstKind::FormalParameterRest(param) => {
-                param.bind(self);
-            }
-            AstKind::CatchParameter(param) => {
-                param.bind(self);
-            }
-            AstKind::TSModuleDeclaration(module_declaration) => {
-                module_declaration.bind(self);
-            }
-            AstKind::TSTypeAliasDeclaration(type_alias_declaration) => {
-                type_alias_declaration.bind(self);
-            }
-            AstKind::TSInterfaceDeclaration(interface_declaration) => {
-                interface_declaration.bind(self);
-            }
-            AstKind::TSEnumDeclaration(enum_declaration) => {
-                enum_declaration.bind(self);
-                // TODO: const enum?
-            }
-            AstKind::TSEnumMember(enum_member) => {
-                enum_member.bind(self);
-            }
-            AstKind::TSTypeParameter(type_parameter) => {
-                type_parameter.bind(self);
-            }
-            AstKind::TSPropertySignature(signature) => {
-                if signature.key.is_expression() {
-                    // interface A { [prop]: string }
-                    //               ^^^^^ The property can reference value or [`SymbolFlags::TypeImport`] symbol
-                    self.current_reference_flags = ReferenceFlags::ValueAsType;
-                }
-            }
-            AstKind::TSTypeQuery(_) => {
-                // type A = typeof a;
-                //          ^^^^^^^^
-                self.current_reference_flags = ReferenceFlags::ValueAsType;
-            }
             AstKind::TSInterfaceHeritage(_)
             | AstKind::TSClassImplements(_)
             | AstKind::TSTypeReference(_) => {
@@ -2214,9 +2363,6 @@ impl<'a> SemanticBuilder<'a> {
                 //         ^^^^^^^^^^^^
 
                 self.current_reference_flags = ReferenceFlags::Type;
-            }
-            AstKind::IdentifierReference(ident) => {
-                self.reference_identifier(ident);
             }
             AstKind::ContinueStatement(ContinueStatement { label, .. })
             | AstKind::BreakStatement(BreakStatement { label, .. }) => {
